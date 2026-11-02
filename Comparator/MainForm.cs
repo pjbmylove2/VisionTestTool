@@ -109,7 +109,7 @@ namespace MachineVision.Algorithm.Comparator
     // ==========================================
     // 2. UI 로직 (MainForm)
     // ==========================================
-    public class MainForm : Form
+    public partial class MainForm : Form
     {
         private TextBox _txtRefImage;
         private TextBox _txtTargetImage;

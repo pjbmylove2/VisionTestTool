@@ -333,11 +333,11 @@ UI 없는 .NET 8 콘솔 프로그램입니다. 실행 출력(코드 기준):
 
 ## 알려진 문제
 
-캡처하면서 확인한 내용입니다. 이번 작업에서는 코드를 고치지 않았습니다.
+캡처하면서 확인한 내용입니다.
 
 | 프로젝트 | 증상 | 원인 |
 |---|---|---|
-| Comparator, MemoryTracker | 솔루션 빌드 시 `CS0260` 오류(빌드 실패) | `MainForm.cs`의 `public class MainForm`에 `partial`이 없는데 `MainForm.Designer.cs`는 `partial class MainForm`으로 선언됨. 캡처는 복사본에 `partial`을 붙여 빌드했습니다. |
+| Comparator, MemoryTracker | ~~솔루션 빌드 시 `CS0260` 오류(빌드 실패)~~ **수정됨** | `MainForm.cs`의 `public class MainForm`에 `partial`이 없는데 `MainForm.Designer.cs`는 `partial class MainForm`으로 선언되어 있었음. `partial`을 붙여 해결. |
 | OpenCvMaskComparator | 솔루션에 없음 | `.sln`에 등록되어 있지 않음(단독 빌드는 정상). |
 | VisionTestToll | 솔루션에 없음 | `.sln`에 등록되어 있지 않음(단독 빌드는 정상). |
 | Comparator | `Debug|Any CPU`로 실행하면 "프로세스가 32비트(x86)입니다" 오류 | `Any CPU` 구성은 32비트 우선으로 실행되고, 코드가 64비트만 허용함. `x64` 플랫폼으로 빌드하면 정상. |
