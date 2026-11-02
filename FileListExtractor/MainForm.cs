@@ -1,0 +1,423 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using Ookii.Dialogs.WinForms; // 폴더 선택기를 위해 NuGet 'Ookii.Dialogs.WinForms' 필요 (없으면 주석 처리 후 FolderBrowserDialog 사용)
+
+// 🌟 [방어적 코딩] 명시적 별칭 선언
+using WinColor = System.Drawing.Color;
+using WinLabel = System.Windows.Forms.Label;
+using FontStyle = System.Drawing.FontStyle;
+using System.Text;
+
+namespace FileListExtractor
+{
+    // ==========================================
+    // 1. 데이터 모델 및 Enum
+    // ==========================================
+    public enum SortDirection
+    {
+        Ascending,
+        Descending
+    }
+
+    public enum ExtractionStage
+    {
+        Scanning,
+        Sorting,
+        Saving
+    }
+
+    public class ExtractionProgress
+    {
+        public ExtractionStage Stage { get; set; }
+        public int ProcessedFiles { get; set; }
+        public int TotalFiles { get; set; }
+    }
+
+    public class ExtractionSummary
+    {
+        public int TotalFilesCount { get; set; }
+        public long ElapsedMilliseconds { get; set; }
+        public string OutputFilePath { get; set; }
+    }
+
+    // ==========================================
+    // 2. 비즈니스 로직 (🚀 대용량 이미지 리스트 추출 엔진)
+    // ==========================================
+    public class ImageExtractorCore
+    {
+        // 🌟 현장에서 자주 쓰이는 머신비전 이미지 확장자 해시셋 (대소문자 무시 고속 검색용)
+        private static readonly HashSet<string> ValidExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".jpg", ".jpeg", ".bmp", ".png", ".tif", ".tiff"
+        };
+
+        public async Task<ExtractionSummary> ExtractImageListAsync(
+            string targetDirectory,
+            string outputFilePath,
+            SortDirection sortDir,
+            IProgress<ExtractionProgress> progress,
+            CancellationToken token)
+        {
+            if (string.IsNullOrWhiteSpace(targetDirectory) || !Directory.Exists(targetDirectory))
+            {
+                throw new DirectoryNotFoundException($"대상 폴더를 찾을 수 없습니다: {targetDirectory}");
+            }
+
+            var summary = new ExtractionSummary();
+            var sw = Stopwatch.StartNew();
+
+            await Task.Run(() =>
+            {
+                // 🌟 [핵심 최적화 1] EnumerateFiles 지연 평가 (OOM 방지)
+                IEnumerable<string> fileEnumerable;
+                try
+                {
+                    fileEnumerable = Directory.EnumerateFiles(targetDirectory, "*.*", SearchOption.TopDirectoryOnly);
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    throw new InvalidOperationException($"폴더 접근 권한이 없습니다: {ex.Message}", ex);
+                }
+
+                // 🌟 [핵심 최적화 2] 1차 스캔: 확장자 필터링 및 파일명 추출
+                var fileNames = new List<string>(20000);
+                int count = 0;
+
+                foreach (string filePath in fileEnumerable)
+                {
+                    token.ThrowIfCancellationRequested();
+
+                    string ext = Path.GetExtension(filePath);
+                    // 해시셋을 이용한 O(1) 초고속 확장자 검사
+                    if (ValidExtensions.Contains(ext))
+                    {
+                        fileNames.Add(Path.GetFileName(filePath));
+                        count++;
+
+                        if (count % 5000 == 0)
+                        {
+                            progress?.Report(new ExtractionProgress
+                            {
+                                Stage = ExtractionStage.Scanning,
+                                ProcessedFiles = count
+                            });
+                        }
+                    }
+                }
+
+                summary.TotalFilesCount = count;
+                if (count == 0) return; // 이미지 파일이 없으면 즉시 종료
+
+                // 🌟 [핵심 최적화 3] 정렬 (Sorting)
+                progress?.Report(new ExtractionProgress { Stage = ExtractionStage.Sorting, ProcessedFiles = count, TotalFiles = count });
+
+                if (sortDir == SortDirection.Ascending)
+                {
+                    fileNames.Sort(StringComparer.OrdinalIgnoreCase);
+                }
+                else
+                {
+                    fileNames.Sort((x, y) => string.Compare(y, x, StringComparison.OrdinalIgnoreCase));
+                }
+
+                // 🌟 [핵심 최적화 4] 임시 파일에 고속 순차 쓰기 (Safe Save)
+                string tempFilePath = outputFilePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+
+                try
+                {
+                    progress?.Report(new ExtractionProgress { Stage = ExtractionStage.Saving, ProcessedFiles = 0, TotalFiles = count });
+
+                    using (var fs = new FileStream(tempFilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 131072, FileOptions.SequentialScan))
+                    using (var writer = new StreamWriter(fs, new UTF8Encoding(true)))
+                    {
+                        // 엑셀/구글시트 복붙을 위해 헤더 없이 파일명만 깔끔하게 기록
+                        for (int i = 0; i < fileNames.Count; i++)
+                        {
+                            token.ThrowIfCancellationRequested();
+
+                            writer.WriteLine(fileNames[i]);
+
+                            if ((i + 1) % 10000 == 0 || i + 1 == fileNames.Count)
+                            {
+                                progress?.Report(new ExtractionProgress
+                                {
+                                    Stage = ExtractionStage.Saving,
+                                    ProcessedFiles = i + 1,
+                                    TotalFiles = count
+                                });
+                            }
+                        }
+                    }
+
+                    // 저장이 완벽하게 끝나면 임시 파일을 최종 결과물 이름으로 변경 (원자적 교체)
+                    token.ThrowIfCancellationRequested();
+                    File.Move(tempFilePath, outputFilePath);
+                }
+                finally
+                {
+                    // 에러나 취소 발생 시 쓰레기 임시 파일 청소
+                    if (File.Exists(tempFilePath))
+                    {
+                        File.Delete(tempFilePath);
+                    }
+                }
+
+            }, token).ConfigureAwait(false);
+
+            sw.Stop();
+            summary.ElapsedMilliseconds = sw.ElapsedMilliseconds;
+            summary.OutputFilePath = outputFilePath;
+
+            return summary;
+        }
+    }
+
+    // ==========================================
+    // 3. UI 로직 (MainForm)
+    // ==========================================
+    public partial class MainForm : Form
+    {
+        private TextBox _txtTargetFolder;
+        private Button _btnSelectFolder;
+        private RadioButton _rdoAscending;
+        private RadioButton _rdoDescending;
+        private Button _btnExtract;
+        private ProgressBar _progressBar;
+        private WinLabel _lblStatus;
+        private RichTextBox _rtbLog;
+
+        private readonly ImageExtractorCore _extractorCore;
+        private CancellationTokenSource _cts;
+        private bool _isProcessing;
+
+        public MainForm()
+        {
+            _extractorCore = new ImageExtractorCore();
+            InitializeDarkUI();
+        }
+
+        private void BtnSelectFolder_Click(object sender, EventArgs e)
+        {
+            // Ookii Dialogs가 없으면 FolderBrowserDialog로 대체 가능
+            using (var dialog = new FolderBrowserDialog())
+            {
+                dialog.Description = "이미지 파일 목록을 추출할 폴더를 선택하세요.";
+
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    _txtTargetFolder.Text = dialog.SelectedPath;
+                }
+            }
+        }
+
+        private async void BtnExtract_Click(object sender, EventArgs e)
+        {
+            if (_isProcessing)
+            {
+                AppendLog("작업 취소를 요청합니다...", WinColor.Yellow);
+                _cts?.Cancel();
+                _btnExtract.Enabled = false;
+                return;
+            }
+
+            string targetDirectory = _txtTargetFolder.Text.Trim();
+
+            if (!Directory.Exists(targetDirectory))
+            {
+                MessageBox.Show("유효한 대상 폴더를 선택하세요.", "경고", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // 바탕화면에 결과 TXT 파일 생성
+            string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string timeStamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string outputFilePath = Path.Combine(desktopPath, $"ImageList_{timeStamp}.txt");
+
+            SortDirection sortDir = _rdoAscending.Checked ? SortDirection.Ascending : SortDirection.Descending;
+
+            _cts = new CancellationTokenSource();
+            _isProcessing = true;
+            ToggleUiState();
+
+            _progressBar.Style = System.Windows.Forms.ProgressBarStyle.Marquee;
+            _lblStatus.Text = "상태: 폴더 내 파일 스캔 중...";
+            _rtbLog.Clear();
+
+            AppendLog($"[{sortDir}] 이미지 파일 목록 추출을 시작합니다.", WinColor.LimeGreen);
+
+            var progress = new Progress<ExtractionProgress>(value =>
+            {
+                if (!_isProcessing) return;
+
+                if (value.Stage == ExtractionStage.Scanning)
+                {
+                    _lblStatus.Text = $"상태: 이미지 스캔 중... ({value.ProcessedFiles:N0}개 발견)";
+                }
+                else if (value.Stage == ExtractionStage.Sorting)
+                {
+                    _lblStatus.Text = "상태: 파일명 정렬 중...";
+                    _progressBar.Style = System.Windows.Forms.ProgressBarStyle.Marquee;
+                }
+                else if (value.Stage == ExtractionStage.Saving)
+                {
+                    if (_progressBar.Style != System.Windows.Forms.ProgressBarStyle.Continuous)
+                    {
+                        _progressBar.Style = System.Windows.Forms.ProgressBarStyle.Continuous;
+                        _progressBar.Value = 0;
+                    }
+
+                    int percent = value.TotalFiles == 0 ? 100 : (int)((long)value.ProcessedFiles * 100 / value.TotalFiles);
+                    _progressBar.Value = Math.Max(0, Math.Min(100, percent));
+                    _lblStatus.Text = $"상태: TXT 파일 저장 중... ({value.ProcessedFiles:N0}/{value.TotalFiles:N0})";
+                }
+            });
+
+            try
+            {
+                ExtractionSummary summary = await _extractorCore.ExtractImageListAsync(
+                    targetDirectory,
+                    outputFilePath,
+                    sortDir,
+                    progress,
+                    _cts.Token);
+
+                if (summary.TotalFilesCount == 0)
+                {
+                    _progressBar.Style = System.Windows.Forms.ProgressBarStyle.Continuous;
+                    _progressBar.Value = 100;
+                    _lblStatus.Text = "상태: 완료 (이미지 파일 없음)";
+                    AppendLog("선택한 폴더에 이미지 파일(JPG, BMP, PNG 등)이 존재하지 않습니다.", WinColor.Orange);
+                    return;
+                }
+
+                _progressBar.Style = System.Windows.Forms.ProgressBarStyle.Continuous;
+                _progressBar.Value = 100;
+                _lblStatus.Text = $"상태: 완료 ({summary.TotalFilesCount:N0}개 이미지 추출됨)";
+
+                AppendLog($"✔ 완료! {summary.TotalFilesCount:N0}개의 이미지 파일명을 정리했습니다.", WinColor.Cyan);
+                AppendLog($"⏱ 소요 시간: {summary.ElapsedMilliseconds:N0} ms", WinColor.LightGray);
+                AppendLog($"📁 저장 위치: {summary.OutputFilePath}", WinColor.Yellow);
+
+                // 자동 열기
+                try
+                {
+                    Process.Start(new ProcessStartInfo(summary.OutputFilePath) { UseShellExecute = true });
+                }
+                catch (Exception ex)
+                {
+                    AppendLog($"텍스트 파일 자동 열기 실패: {ex.Message}", WinColor.Yellow);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                _progressBar.Style = System.Windows.Forms.ProgressBarStyle.Continuous;
+                _lblStatus.Text = "상태: 작업 취소됨";
+                AppendLog("작업이 사용자에 의해 취소되었습니다.", WinColor.Tomato);
+            }
+            catch (Exception ex)
+            {
+                _progressBar.Style = System.Windows.Forms.ProgressBarStyle.Continuous;
+                _lblStatus.Text = "상태: 오류 발생";
+                AppendLog($"[오류] {ex.Message}", WinColor.Tomato);
+            }
+            finally
+            {
+                _isProcessing = false;
+                _cts.Dispose();
+                _cts = null;
+                ToggleUiState();
+            }
+        }
+
+        private void ToggleUiState()
+        {
+            if (InvokeRequired) { Invoke(new Action(ToggleUiState)); return; }
+
+            _txtTargetFolder.Enabled = !_isProcessing;
+            _btnSelectFolder.Enabled = !_isProcessing;
+            _rdoAscending.Enabled = !_isProcessing;
+            _rdoDescending.Enabled = !_isProcessing;
+            _btnExtract.Enabled = true;
+
+            if (_isProcessing)
+            {
+                _btnExtract.Text = "CANCEL (작업 취소)";
+                _btnExtract.BackColor = WinColor.FromArgb(204, 74, 74);
+            }
+            else
+            {
+                _btnExtract.Text = "EXTRACT IMAGE LIST (추출 시작)";
+                _btnExtract.BackColor = WinColor.FromArgb(0, 122, 204);
+            }
+        }
+
+        private void AppendLog(string text, WinColor color)
+        {
+            if (InvokeRequired) { Invoke(new Action(() => AppendLog(text, color))); return; }
+            _rtbLog.SelectionStart = _rtbLog.TextLength;
+            _rtbLog.SelectionLength = 0;
+            _rtbLog.SelectionColor = color;
+            _rtbLog.AppendText($"[{DateTime.Now:HH:mm:ss.fff}] {text}\n");
+            _rtbLog.ScrollToCaret();
+        }
+
+        private void InitializeDarkUI()
+        {
+            this.Text = "Vision FA Image List Extractor Pro";
+            this.Size = new Size(600, 450);
+            this.MinimumSize = new Size(600, 450);
+            this.BackColor = WinColor.FromArgb(30, 30, 30);
+            this.ForeColor = WinColor.WhiteSmoke;
+            this.Font = new Font("Consolas", 10F, FontStyle.Regular);
+            this.StartPosition = FormStartPosition.CenterScreen;
+
+            int yPos = 20;
+
+            var lblFolder = new WinLabel { Text = "Target Dir:", Location = new Point(20, yPos + 4), Size = new Size(100, 20), ForeColor = WinColor.LightSkyBlue };
+            _txtTargetFolder = new TextBox { Location = new Point(120, yPos), Size = new Size(350, 23), BackColor = WinColor.FromArgb(45, 45, 48), ForeColor = WinColor.White };
+            _btnSelectFolder = new Button { Text = "BROWSE", Location = new Point(480, yPos - 1), Size = new Size(80, 25), BackColor = WinColor.FromArgb(62, 62, 66), FlatStyle = FlatStyle.Flat };
+
+            _btnSelectFolder.FlatAppearance.BorderSize = 0;
+            _btnSelectFolder.Click += BtnSelectFolder_Click;
+
+            this.Controls.Add(lblFolder); this.Controls.Add(_txtTargetFolder); this.Controls.Add(_btnSelectFolder);
+
+            yPos += 45;
+
+            var lblSort = new WinLabel { Text = "Sort Order:", Location = new Point(20, yPos + 2), Size = new Size(100, 20), ForeColor = WinColor.LightGreen };
+            _rdoAscending = new RadioButton { Text = "오름차순 (A ➔ Z)", Location = new Point(120, yPos), Size = new Size(160, 20), Checked = true, ForeColor = WinColor.White };
+            _rdoDescending = new RadioButton { Text = "내림차순 (Z ➔ A)", Location = new Point(290, yPos), Size = new Size(160, 20), ForeColor = WinColor.White };
+
+            this.Controls.Add(lblSort); this.Controls.Add(_rdoAscending); this.Controls.Add(_rdoDescending);
+
+            yPos += 45;
+
+            _btnExtract = new Button { Text = "EXTRACT IMAGE LIST (추출 시작)", Location = new Point(20, yPos), Size = new Size(540, 45), BackColor = WinColor.FromArgb(0, 122, 204), FlatStyle = FlatStyle.Flat, Font = new Font("Consolas", 12F, FontStyle.Bold) };
+            _btnExtract.FlatAppearance.BorderSize = 0;
+            _btnExtract.Click += BtnExtract_Click;
+            this.Controls.Add(_btnExtract);
+
+            yPos += 60;
+
+            _lblStatus = new WinLabel { Text = "상태: 대기 중...", Location = new Point(20, yPos), Size = new Size(540, 20), ForeColor = WinColor.Cyan };
+            this.Controls.Add(_lblStatus);
+
+            yPos += 25;
+
+            _progressBar = new ProgressBar { Location = new Point(20, yPos), Size = new Size(540, 10), Style = System.Windows.Forms.ProgressBarStyle.Continuous };
+            this.Controls.Add(_progressBar);
+
+            yPos += 25;
+
+            _rtbLog = new RichTextBox { Location = new Point(20, yPos), Size = new Size(540, 140), BackColor = WinColor.FromArgb(18, 18, 18), ForeColor = WinColor.LightGray, ReadOnly = true, BorderStyle = BorderStyle.None };
+            this.Controls.Add(_rtbLog);
+        }
+    }
+}

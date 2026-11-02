@@ -1,0 +1,26 @@
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+TestResults/
+
+# NuGet (packages.config restore)
+packages/
+*.nupkg
+!packages/repositories.config
+
+# Misc
+*.cache
+*.tmp
+Thumbs.db
