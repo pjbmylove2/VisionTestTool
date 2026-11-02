@@ -20,6 +20,8 @@ msbuild VisionTestTool.sln /p:Configuration=Debug
 
 ## 프로젝트 구성
 
+> 프로젝트별 실행 화면 캡처와 코드 분석은 [docs/PROJECTS.md](docs/PROJECTS.md)에 있습니다.
+
 ### 설비·통신 시뮬레이터
 
 | 프로젝트 | 설명 |

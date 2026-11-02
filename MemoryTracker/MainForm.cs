@@ -124,7 +124,7 @@ namespace MachineVision.Tool.MemoryTracker
     // ==========================================
     // 3. UI 로직 (GDI/핸들 통합 뷰어)
     // ==========================================
-    public class MainForm : Form
+    public partial class MainForm : Form
     {
         private TextBox _txtProcessName;
         private Button _btnToggleMonitor;
